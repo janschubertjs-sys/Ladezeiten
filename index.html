@@ -4,13 +4,36 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ladezeit & Kosten</title>
+
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 14px; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 560px;
+      margin: 24px auto;
+      padding: 0 14px;
+    }
     h1 { text-align: center; }
-    label { display:block; margin-top: 12px; }
-    input { width: 100%; padding: 10px; font-size: 16px; margin-top: 6px; }
-    button { margin-top: 18px; width: 100%; padding: 12px; font-size: 17px; font-weight: 600; }
-    .out { margin-top: 18px; padding: 14px; background: #f3f3f3; border-radius: 10px; line-height: 1.6; }
+    label { display: block; margin-top: 12px; }
+    input {
+      width: 100%;
+      padding: 10px;
+      font-size: 16px;
+      margin-top: 6px;
+    }
+    button {
+      margin-top: 14px;
+      width: 100%;
+      padding: 12px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .out {
+      margin-top: 18px;
+      padding: 14px;
+      background: #f3f3f3;
+      border-radius: 10px;
+      line-height: 1.6;
+    }
     small { color: #555; }
   </style>
 </head>
@@ -39,14 +62,18 @@
   </label>
 
   <label>Strompreis (€/kWh)
-    <input id="price" type="number" step="0.01" min="0" value="0.35">
+    <input id="price" type="number" step="0.01" value="0.35">
   </label>
 
-  <button type="button" onclick="calc()">Berechnen</button>
+  <button type="button" onclick="calcAndSave()">Berechnen (speichert automatisch)</button>
+  <button type="button" onclick="exportCSV()">CSV exportieren</button>
+  <button type="button" onclick="clearCSV()">CSV zurücksetzen</button>
 
   <div class="out" id="out">Ergebnis erscheint hier.</div>
 
 <script>
+const STORAGE_KEY = "ladezeit_csv_v2";
+
 function fmtTime(hours) {
   const totalMinutes = Math.round(hours * 60);
   const h = Math.floor(totalMinutes / 60);
@@ -58,7 +85,7 @@ function show(html) {
   document.getElementById('out').innerHTML = html;
 }
 
-function calc() {
+function compute() {
   const cap   = Number(document.getElementById('cap').value);
   const power = Number(document.getElementById('power').value);
   const start = Number(document.getElementById('start').value);
@@ -66,33 +93,125 @@ function calc() {
   const lossP = Number(document.getElementById('loss').value);
   const price = Number(document.getElementById('price').value);
 
-  if (!cap || cap <= 0) return show("Kapazität muss > 0 sein.");
-  if (!power || power <= 0) return show("Ladeleistung muss > 0 sein.");
-  if (start < 0 || start > 100 || target < 0 || target > 100) return show("Prozentwerte müssen 0–100 sein.");
-  if (target <= start) return show("Ziel muss größer als Start sein.");
-  if (price < 0) return show("Strompreis muss ≥ 0 sein.");
+  if (!cap || cap <= 0) throw new Error("Kapazität muss > 0 sein.");
+  if (!power || power <= 0) throw new Error("Ladeleistung muss > 0 sein.");
+  if (start < 0 || start > 100 || target < 0 || target > 100)
+    throw new Error("Prozentwerte müssen 0–100 sein.");
+  if (target <= start) throw new Error("Ziel muss größer als Start sein.");
+  if (price < 0) throw new Error("Strompreis muss ≥ 0 sein.");
 
-  const energy = cap * ((target - start) / 100);
-  const idealHours = energy / power;
+  const delta = (target - start) / 100;
+  const energy = cap * delta;                 // kWh im Akku
+  const idealHours = energy / power;          // h
 
   const loss = Math.min(Math.max(lossP, 0), 90) / 100;
-  const gridEnergy = energy / (1 - loss);
-  const realHours = idealHours / (1 - loss);
+  const gridEnergy = energy / (1 - loss);     // kWh aus dem Netz
+  const realHours = idealHours / (1 - loss);  // h
 
   const costIdeal = energy * price;
   const costReal  = gridEnergy * price;
 
-  show(
-    `Benötigte Energie (Akku): <b>${energy.toFixed(2)} kWh</b><br>` +
-    `Ideale Ladezeit: <b>${fmtTime(idealHours)}</b><br><br>` +
-    `Energie aus dem Netz: <b>${gridEnergy.toFixed(2)} kWh</b><br>` +
-    `Ladezeit inkl. Verluste: <b>${fmtTime(realHours)}</b><br><br>` +
-    `Kosten (ideal): <b>${costIdeal.toFixed(2)} €</b><br>` +
-    `Kosten (realistisch): <b>${costReal.toFixed(2)} €</b>`
-  );
+  return { cap, power, start, target, lossP, price,
+           energy, idealHours, gridEnergy, realHours,
+           costIdeal, costReal };
 }
 
-calc(); // initial
+function getEntries() {
+  return JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+}
+
+function saveEntries(entries) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+}
+
+function appendEntry(r) {
+  const now = new Date().toLocaleString("de-DE");
+  const entries = getEntries();
+
+  entries.push({
+    date: now,
+    cap: r.cap, power: r.power, start: r.start, target: r.target,
+    loss: r.lossP, price: r.price,
+    energy: r.energy, idealHours: r.idealHours,
+    gridEnergy: r.gridEnergy, realHours: r.realHours,
+    costIdeal: r.costIdeal, costReal: r.costReal
+  });
+
+  saveEntries(entries);
+  return entries.length;
+}
+
+function calcAndSave() {
+  try {
+    const r = compute();
+
+    // anzeigen
+    show(
+      `Benötigte Energie (Akku): <b>${r.energy.toFixed(2)} kWh</b><br>` +
+      `Ideale Ladezeit: <b>${fmtTime(r.idealHours)}</b><br><br>` +
+      `Energie aus dem Netz: <b>${r.gridEnergy.toFixed(2)} kWh</b><br>` +
+      `Ladezeit inkl. Verluste: <b>${fmtTime(r.realHours)}</b><br><br>` +
+      `Kosten (ideal): <b>${r.costIdeal.toFixed(2)} €</b><br>` +
+      `Kosten (realistisch): <b>${r.costReal.toFixed(2)} €</b><br><br>` +
+      `<small>Hinweis: Beim Klick auf „Berechnen“ wird automatisch ein Eintrag gespeichert.</small>`
+    );
+
+    // speichern (automatisch)
+    appendEntry(r);
+  } catch (e) {
+    show(e.message || String(e));
+  }
+}
+
+function exportCSV() {
+  const entries = getEntries();
+  if (entries.length === 0) {
+    alert("Keine Einträge vorhanden.");
+    return;
+  }
+
+  let csv =
+    "Datum;Kapazität kWh;Leistung kW;Start %;Ziel %;Verluste %;Preis €/kWh;" +
+    "Energie Akku kWh;Ladezeit ideal h;Energie Netz kWh;Ladezeit real h;Kosten ideal €;Kosten real €\n";
+
+  entries.forEach(e => {
+    csv +=
+      `${e.date};${e.cap};${e.power};${e.start};${e.target};${e.loss};${e.price};` +
+      `${Number(e.energy).toFixed(2)};${Number(e.idealHours).toFixed(2)};` +
+      `${Number(e.gridEnergy).toFixed(2)};${Number(e.realHours).toFixed(2)};` +
+      `${Number(e.costIdeal).toFixed(2)};${Number(e.costReal).toFixed(2)}\n`;
+  });
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "ladevorgaenge.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function clearCSV() {
+  localStorage.removeItem(STORAGE_KEY);
+  alert("Alle gespeicherten Einträge gelöscht.");
+}
+
+// Initial: nur anzeigen, NICHT speichern
+(function initialRender() {
+  try {
+    const r = compute();
+    show(
+      `Benötigte Energie (Akku): <b>${r.energy.toFixed(2)} kWh</b><br>` +
+      `Ideale Ladezeit: <b>${fmtTime(r.idealHours)}</b><br><br>` +
+      `Energie aus dem Netz: <b>${r.gridEnergy.toFixed(2)} kWh</b><br>` +
+      `Ladezeit inkl. Verluste: <b>${fmtTime(r.realHours)}</b><br><br>` +
+      `Kosten (ideal): <b>${r.costIdeal.toFixed(2)} €</b><br>` +
+      `Kosten (realistisch): <b>${r.costReal.toFixed(2)} €</b>`
+    );
+  } catch (_) {
+    // ignorieren
+  }
+})();
 </script>
 </body>
 </html>
